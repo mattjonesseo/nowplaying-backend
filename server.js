@@ -1,4 +1,4 @@
-
+// ✅ server.js
 require('dotenv').config();
 const express = require('express');
 const request = require('request');
@@ -13,6 +13,7 @@ app.use(cors());
 const client_id = process.env.SPOTIFY_CLIENT_ID;
 const client_secret = process.env.SPOTIFY_CLIENT_SECRET;
 const redirect_uri = process.env.REDIRECT_URI;
+const frontend_uri = process.env.FRONTEND_URI;
 
 const generateRandomString = length => {
   let text = '';
@@ -34,7 +35,8 @@ app.get('/login', (req, res) => {
       client_id: client_id,
       scope: scope,
       redirect_uri: redirect_uri,
-      state: state
+      state: state,
+      show_dialog: true // 🔥 Force login screen even if already authenticated
     }));
 });
 
@@ -59,11 +61,9 @@ app.get('/callback', (req, res) => {
       const access_token = body.access_token;
       const refresh_token = body.refresh_token;
       const query = querystring.stringify({ access_token, refresh_token });
-
-      // 👇 This must match your actual frontend
-      res.redirect(`${process.env.FRONTEND_URI}/?${query}`);
+      res.redirect(`${frontend_uri}/?${query}`);
     } else {
-      res.redirect(`${process.env.FRONTEND_URI}/?error=invalid_token`);
+      res.redirect(`${frontend_uri}/?error=invalid_token`);
     }
   });
 });
@@ -109,7 +109,6 @@ app.get('/now-playing', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  console.log('🟢 / route hit');
   res.send('NowPlayingOverlay backend running');
 });
 
