@@ -59,6 +59,8 @@ app.get('/callback', (req, res) => {
       const access_token = body.access_token;
       const refresh_token = body.refresh_token;
       const query = querystring.stringify({ access_token, refresh_token });
+
+      // 👇 This must match your actual frontend
       res.redirect(`${process.env.FRONTEND_URI}/?${query}`);
     } else {
       res.redirect(`${process.env.FRONTEND_URI}/?error=invalid_token`);
