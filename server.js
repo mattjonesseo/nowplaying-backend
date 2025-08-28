@@ -1,4 +1,4 @@
-// ✅ server.js (pass-through by default; stable mode via ?stable=1)
+// ✅ server.js — pass-through by default; stable mode via ?stable=1
 require('dotenv').config();
 const express = require('express');
 const request = require('request');
@@ -12,8 +12,8 @@ app.use(cors());
 
 const client_id = process.env.SPOTIFY_CLIENT_ID;
 const client_secret = process.env.SPOTIFY_CLIENT_SECRET;
-const redirect_uri = process.env.REDIRECT_URI;
-const frontend_uri = process.env.FRONTEND_URI;
+const redirect_uri = process.env.REDIRECT_URI;   // e.g. https://<backend>/callback
+const frontend_uri = process.env.FRONTEND_URI;   // e.g. https://<frontend>
 
 // Per-token memory for stable mode guards
 const lastByToken = new Map(); // { item, is_playing, progress_ms, timestamp, accepted_at, source_status }
@@ -36,61 +36,104 @@ function setNoStore(res) {
   });
 }
 
+// Ensure return path is a safe, same-site path (avoid open-redirects)
+function sanitizeReturnPath(ret) {
+  if (typeof ret !== 'string' || !ret.trim()) return '/spotify-overlay';
+  // only allow same-site relative paths
+  if (!ret.startsWith('/')) return '/spotify-overlay';
+  // avoid protocol-like strings in weird cases
+  if (ret.startsWith('//')) return '/spotify-overlay';
+  return ret;
+}
+
+/**
+ * LOGIN
+ * Accepts optional ?return=/some-route to route users back to a FE page after auth
+ * Always forces account chooser with show_dialog=true so it won't silently reuse another session.
+ */
 app.get('/login', (req, res) => {
-  const state = generateRandomString(16);
+  const nonce = generateRandomString(16);
   const scope = 'user-read-playback-state user-read-currently-playing';
-  res.redirect('https://accounts.spotify.com/authorize?' + querystring.stringify({
+
+  const ret = sanitizeReturnPath(req.query.return || '/spotify-overlay');
+  const statePayload = JSON.stringify({ n: nonce, ret });
+
+  const redirect = 'https://accounts.spotify.com/authorize?' + querystring.stringify({
     response_type: 'code',
     client_id,
     scope,
     redirect_uri,
-    state,
-    show_dialog: true
-  }));
+    state: statePayload,
+    show_dialog: true, // 🔒 force the account chooser
+  });
+
+  res.redirect(redirect);
 });
 
+/**
+ * CALLBACK
+ * Exchanges code for tokens and redirects back to the FE route encoded in state.ret (defaults to /spotify-overlay)
+ */
 app.get('/callback', (req, res) => {
-  const code = req.query.code || null;
+  let retPath = '/spotify-overlay';
+  try {
+    if (req.query.state) {
+      const parsed = JSON.parse(req.query.state);
+      retPath = sanitizeReturnPath(parsed && parsed.ret);
+    }
+  } catch {
+    retPath = '/spotify-overlay';
+  }
 
+  const code = req.query.code || null;
   const authOptions = {
     url: 'https://accounts.spotify.com/api/token',
     form: { code, redirect_uri, grant_type: 'authorization_code' },
     headers: { 'Authorization': 'Basic ' + Buffer.from(client_id + ':' + client_secret).toString('base64') },
     json: true,
-    timeout: 8000
+    timeout: 10000,
   };
 
   request.post(authOptions, (error, response, body) => {
-    if (!error && response.statusCode === 200) {
+    if (!error && response && response.statusCode === 200) {
       const access_token = body.access_token;
       const refresh_token = body.refresh_token;
-      const query = querystring.stringify({ access_token, refresh_token });
-      res.redirect(`${frontend_uri}/?${query}`);
-    } else {
-      res.redirect(`${frontend_uri}/?error=invalid_token`);
+      const q = querystring.stringify({ access_token, refresh_token });
+      // redirect to the chosen FE route (e.g., /spotify-overlay) with tokens in query
+      return res.redirect(`${frontend_uri}${retPath}?${q}`);
     }
+    return res.redirect(`${frontend_uri}${retPath}?error=invalid_token`);
   });
 });
 
+/**
+ * Refresh access token with refresh_token
+ */
 app.get('/refresh_token', (req, res) => {
   const refresh_token = req.query.refresh_token;
+  if (!refresh_token) return res.status(400).send({ error: 'Missing refresh_token' });
+
   const authOptions = {
     url: 'https://accounts.spotify.com/api/token',
     headers: { 'Authorization': 'Basic ' + Buffer.from(client_id + ':' + client_secret).toString('base64') },
     form: { grant_type: 'refresh_token', refresh_token },
     json: true,
-    timeout: 8000
+    timeout: 10000,
   };
 
   request.post(authOptions, (error, response, body) => {
-    if (!error && response.statusCode === 200) {
-      res.send({ access_token: body.access_token });
-    } else {
-      res.status(400).send({ error: 'Failed to refresh token' });
+    if (!error && response && response.statusCode === 200) {
+      return res.send({ access_token: body.access_token });
     }
+    return res.status(400).send({ error: 'Failed to refresh token' });
   });
 });
 
+/**
+ * Now Playing
+ * - Pass-through by default
+ * - Stable mode (?stable=1) guards against early switches and stale samples
+ */
 app.get('/now-playing', (req, res) => {
   const access_token = req.query.access_token;
   if (!access_token) {
@@ -106,10 +149,10 @@ app.get('/now-playing', (req, res) => {
     qs: { market: 'from_token' },
     headers: {
       'Authorization': 'Bearer ' + access_token,
-      'Accept': 'application/json'
+      'Accept': 'application/json',
     },
     json: true,
-    timeout: 8000
+    timeout: 10000,
   }, (error, response, body) => {
     setNoStore(res);
 
@@ -125,7 +168,7 @@ app.get('/now-playing', (req, res) => {
       source_status: status
     };
 
-    // Pass-through mode (default) — keep React preview happy
+    // Pass-through mode (default)
     if (!useStable) {
       if (error) return res.status(200).json(nothingPlaying);
 
@@ -139,7 +182,7 @@ app.get('/now-playing', (req, res) => {
       return res.status(200).json({ ...body, server_now });
     }
 
-    // Stable mode (for OBS) — guards against stale samples & early next-track
+    // Stable mode — guards against stale samples & early next-track
     if (error) return res.status(200).json(nothingPlaying);
 
     if (status === 204) {
